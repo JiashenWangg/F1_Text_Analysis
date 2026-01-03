@@ -1,0 +1,626 @@
+---
+title: "Stylometric Profiling and Speaker Classification in Formula 1 Press-Conference Language"
+author: "Jiashen Wang"
+date: last-modified
+format:
+  pdf:
+    indent: true
+    include-in-header:
+      text: |
+        \addtokomafont{disposition}{\rmfamily}
+execute:
+  echo: false
+---
+
+# Abstract {.unnumbered}
+
+This study examines how Formula 1 drivers use language in official FIA press-conference transcripts from 2022–2025. First, I analyze token counts for the top seven drivers to track changes in media presence across seasons. Second, I compare linguistic style using hierarchical clustering and PCA based on part-of-speech distributions, revealing groupings such as similarities among world champions and among rookie drivers. Finally, I apply a LASSO-regularized logistic regression model to predict whether a transcript was spoken by Max Verstappen, achieving strong validation and test accuracy. Together, these findings show that linguistic behavior in press conferences reflects competitive dynamics in Formula 1 and enables reliable speaker identification using linguistic features.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning=FALSE, message=FALSE, echo=FALSE, cache = TRUE)
+```
+
+```{r}
+library(dplyr)
+library(tidyverse)
+library(ggplot2)
+library(tidytext)
+library(quanteda)
+library(gt)
+library(stringr)
+library(purrr)
+library(quanteda.extras)
+library(factoextra)
+library(patchwork)
+library(udpipe)
+```
+
+```{r}
+f1_25 = read.csv("data/drivers_2025_aggregated.csv")
+f1_24 = read.csv("data/drivers_2024_aggregated.csv")
+f1_23 = read.csv("data/drivers_2023_aggregated.csv")
+f1_22 = read.csv("data/drivers_2022_aggregated.csv")
+```
+
+```{r}
+# Create a list containing all df
+f1_list <- list("2025" = f1_25, "2024" = f1_24, "2023" = f1_23, "2022" = f1_22)
+# Create a df containing all loaded data
+f1_all <- bind_rows(f1_list, .id = "year")
+f1_all <- f1_all %>%
+  mutate(initials = str_to_upper(str_c(str_sub(word(driver, 1), 1, 1),
+                                       str_sub(word(driver, -1), 1, 1))),
+         year = as.numeric(year))
+```
+
+```{r}
+f1_corpus <- corpus(f1_all, , text_field = "text")
+# Attach metadata to corpus
+docvars(f1_corpus) <- f1_all %>% select(-text)
+```
+
+```{r}
+# Count tokens per document
+docvars(f1_corpus, "token_count") <- ntoken(
+  f1_corpus, remove_punct   = TRUE, remove_numbers = FALSE)
+```
+
+```{r}
+f1_corpus <- f1_corpus[docvars(f1_corpus)$token_count >= 200]
+```
+
+```{r}
+# Tokenize the corpus
+f1_tokens <- tokens(f1_corpus, remove_punct = TRUE, remove_numbers = TRUE, 
+                    remove_symbols = TRUE, what = "word") %>%
+  tokens_tolower()
+```
+
+```{r}
+# Create a corpus for drivers with more than 10 press conferences
+# each has one document that combines all texts
+top_drivers_10 <- f1_all %>%
+  group_by(driver) %>%
+  filter(n() > 10) %>%                # keep only drivers with more than 10 rows
+  summarise(
+    text = paste(text, collapse = " "),  # combine all texts into one per driver
+    .groups = "drop"
+  ) %>%
+  arrange(driver)
+```
+
+```{r}
+top_corpus_10 <- corpus(top_drivers_10$text)
+top_meta_10 <- top_drivers_10 %>%
+  mutate(doc_id = driver) %>%
+  select(doc_id, driver)
+docvars(top_corpus_10) <- top_meta_10
+```
+
+```{r}
+top_10_df <- data.frame(
+  doc_id = docnames(top_corpus_10),
+  driver = docvars(top_corpus_10)$driver,
+  text = as.character(top_corpus_10),
+  stringsAsFactors = FALSE
+)
+```
+
+```{r}
+# ud_model <- udpipe_load_model("english-ewt-ud-2.5-191206.udpipe")
+# anno_10 <- udpipe_annotate(ud_model, x = top_10_df$text, doc_id = top_10_df$doc_id)
+# write.csv(anno_10, "anno_10.csv", row.names = FALSE)
+```
+
+```{r}
+anno_df_10 <- read.csv("anno_10.csv")
+anno_df_10 <- anno_df_10 %>%
+  left_join(top_10_df %>% select(doc_id, driver), by = "doc_id")
+```
+
+```{r}
+driver_features_10 <- anno_df_10 %>%
+  group_by(driver, upos) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(driver) %>%
+  mutate(prop = n / sum(n)) %>%
+  pivot_wider(names_from = upos, values_from = prop, values_fill = 0) %>%
+  ungroup()
+```
+
+```{r}
+driver_features_10 <- driver_features_10 %>%
+  group_by(driver) %>%
+  summarise(across(where(is.numeric), mean, na.rm = TRUE), .groups = "drop")
+
+driver_mat_10 <- as.data.frame(driver_features_10)
+rownames(driver_mat_10) <- driver_mat_10$driver
+driver_mat_10 <- driver_mat_10 %>% select(-driver)
+
+# Scale features
+driver_mat_scaled_10 <- scale(driver_mat_10)
+
+dist_driver_10 <- dist(driver_mat_scaled_10, method = "euclidean")
+hc_driver_10 <- hclust(dist_driver_10, method = "ward.D2")
+```
+
+```{r}
+km_pca <- prcomp(driver_mat_scaled_10)
+```
+
+```{r}
+summary = docvars(f1_corpus)
+
+count_i  <- vapply(f1_tokens, function(x) sum(x == "i"), numeric(1))
+count_we <- vapply(f1_tokens, function(x) sum(x == "we"), numeric(1))
+
+keywords = c("they", "struggle", "happy", "difficult", "tough", "win", "fast", "fight")
+keyword_hits <- sapply(keywords, function(k) {
+  vapply(f1_tokens, function(x) as.integer(k %in% x), integer(1))
+})
+
+keyword_df <- as_tibble(keyword_hits) %>%
+  mutate(doc_id = docnames(f1_corpus)) %>%
+  select(doc_id, everything()) %>%
+  mutate(across(-doc_id, as.factor))
+```
+
+```{r}
+sent_toks <- tokens(f1_corpus, what = "sentence")
+
+# total tokens per doc
+token_count <- ntoken(f1_tokens)
+# avg word length
+avg_word <- vapply(f1_tokens, function(x) mean(nchar(x)), numeric(1))
+# avg sentence length
+avg_sentence <- token_count / lengths(sent_toks)
+```
+
+```{r}
+summary <- docvars(f1_corpus) %>%
+  mutate(doc_id = docnames(f1_corpus)) %>%
+  left_join(keyword_df, by = "doc_id") %>%
+  mutate(i = count_i, we = count_we) %>%
+  mutate(
+    i = (i / token_count) * 1000,
+    we = (we / token_count) * 1000
+  ) %>%
+  mutate(
+    avg_word = avg_word,
+    avg_sentence = avg_sentence
+  )
+```
+
+```{r}
+# ud_model <- udpipe_load_model("english-ewt-ud-2.5-191206.udpipe")
+# anno <- udpipe_annotate(ud_model, x = as.character(f1_corpus))
+# write.csv(anno, "anno.csv", row.names = FALSE)
+```
+
+```{r}
+anno_df = read.csv("anno.csv")
+```
+
+```{r}
+# count POS per document
+pos_df <- anno_df %>%
+  dplyr::count(doc_id, upos, name = "pos_count") %>%
+  tidyr::complete(doc_id, upos, fill = list(pos_count = 0))
+
+# total tokens per document
+total_tok <- anno_df %>%
+  dplyr::count(doc_id, name = "total_tokens")
+
+# merge + compute percent
+pos_percent <- pos_df %>%
+  left_join(total_tok, by = "doc_id") %>%
+  mutate(pos_percent = pos_count / total_tokens * 100)
+```
+
+```{r}
+pos_wide <- pos_percent %>%
+  select(doc_id, upos, pos_percent) %>%
+  tidyr::pivot_wider(
+    names_from = upos, 
+    values_from = pos_percent
+  ) 
+pos_wide$doc_id <- gsub("^doc", "text", pos_wide$doc_id)
+```
+
+```{r}
+summary <- summary %>%
+  left_join(pos_wide, by = "doc_id") %>% 
+  select(-ends_with(".x")) %>%                
+  rename_with(~ gsub("\\.y$", "", .x))
+```
+
+```{r}
+summary <- summary %>%
+  mutate(is_MV = ifelse(initials == "MV", 1, 0))
+summary <- na.omit(summary)
+```
+
+```{r}
+train_pool <- summary %>% 
+  filter(year %in% c(2022, 2023, 2024))
+test_set  <- summary %>% filter(year == 2025)
+library(rsample)
+set.seed(36668)
+split_obj <- initial_split(train_pool, prop = 0.8)
+train_df <- training(split_obj)
+valid_df <- testing(split_obj)
+```
+
+```{r}
+predictors <- c(
+  "token_count","they","struggle","happy","difficult","tough","win","fast",
+  "fight","i","we","avg_word","avg_sentence",
+  "ADJ","ADP","ADV","AUX","CCONJ","DET","INTJ","NOUN","NUM",
+  "PART","PRON","PROPN","PUNCT","SCONJ","SYM","VERB","X"
+)
+
+x_train <- as.matrix(train_df[, predictors])
+y_train <- train_df$is_MV
+
+x_valid <- as.matrix(valid_df[, predictors])
+y_valid <- valid_df$is_MV
+
+x_test  <- as.matrix(test_set[, predictors])
+y_test  <- test_set$is_MV
+```
+
+```{r}
+library(glmnet)
+
+cv_fit <- cv.glmnet(
+  x_train, y_train,
+  family = "binomial",
+  alpha = 1   
+)
+```
+
+```{r}
+lambda_min <- cv_fit$lambda.min
+lambda_1se <- cv_fit$lambda.1se
+```
+
+```{r}
+lasso_model <- glmnet(x_train, y_train, alpha = 1, lambda = lambda_min)
+```
+
+```{r}
+valid_pred <- predict(lasso_model, x_valid, type="response")
+valid_acc  <- mean((valid_pred > 0.5) == y_valid)
+```
+
+```{r}
+test_pred <- predict(lasso_model, x_test, type="response")
+test_acc  <- mean((test_pred > 0.5) == y_test)
+```
+
+# Introduction
+
+Formula 1 is a sport defined not only by engineering and race performance, but also by the narratives drivers construct through language. Press-conference transcripts offer a unique opportunity to observe how drivers present themselves, communicate pressure, and reflect competitive dynamics both within teams and across seasons. Understanding how language varies across drivers is therefore valuable for characterizing public personas and identifying what makes certain speakers, like championship contenders, distinctive.
+
+This project investigates three research questions:
+
+**RQ1**: How do token volumes change across seasons for drivers between 2022–2025? \newline
+We expect media presence to vary by performance, suggesting that token counts can act as a proxy for driver prominence.
+
+**RQ2**: How do linguistic styles differ between drivers? \newline
+We hypothesize that some drivers will demonstrate more descriptive, emotionally expressive language, while others favor direct, action-oriented phrasing. To evaluate this, we apply hierarchical clustering and PCA using part-of-speech (POS) distributions extracted via UDPipe.
+
+**RQ3**: Can linguistic features predict whether an interview was spoken by Max Verstappen? \newline
+As a multi-world-champion known for concise and decisive communication, we expect Verstappen’s speech to exhibit a distinct linguistic signature. We test this using a predictive model trained on lexical metrics, keyword indicators, pronoun usage, and POS proportions.
+
+The corpus consists of official Formula 1 press-conference transcripts from 2022 through 2025. They are are well suited to the research questions as they provide consistent language samples across drivers and seasons. Together, these analyses contribute to understanding how language reflects performance, pressure, and identity in one of the world’s most competitive sporting environments.
+
+
+# Data
+
+```{r}
+# Create summary of corpus
+f1_summary <- summary(f1_corpus, by = c("year"), n = 10000) %>%
+  group_by(year) %>%
+  summarise(
+    total_docs = n(),                    
+    total_tokens = sum(as.numeric(token_count)),  
+    .groups = "drop"
+  ) %>%
+  arrange(desc(year), desc(total_tokens))
+```
+
+```{r}
+#| label: tbl-corpus
+#| tbl-cap: "Summary of Corpus"
+f1_summary %>%
+  gt() %>%
+  fmt_integer(columns = c(total_docs, total_tokens)) %>%
+  cols_label(
+    year = md("**Year**"),
+    total_docs = md("**Total Docs**"),
+    total_tokens = md("**Total Tokens**"),
+  ) %>%
+  grand_summary_rows(
+    columns   = c(total_docs, total_tokens),
+    fns       = list(Total = ~ sum(., na.rm = TRUE)),
+    formatter = fmt_integer
+  )
+```
+
+```{r}
+f1_summary_mv <- docvars(f1_corpus) %>%          # use corpus metadata
+  mutate(is_MV = ifelse(initials == "MV", 1, 0)) %>% 
+  group_by(year) %>%
+  summarise(
+    total_tokens = sum(token_count),
+    mv_tokens = sum(token_count * is_MV),         # tokens spoken by MV
+    other_tokens = total_tokens - mv_tokens       # everyone else
+  ) %>%
+  ungroup() %>%
+  pivot_longer(cols = c(mv_tokens, other_tokens),
+               names_to = "speaker_type",
+               values_to = "tokens")
+```
+
+```{r, fig.width=6, fig.height=3.5}
+#| label: fig-tokens_mv
+#| fig-cap: "Token Count by Season with Verstappen Share"
+ggplot(f1_summary_mv, aes(x = factor(year), y = tokens/1000, fill = speaker_type)) +
+  geom_col(width = 0.7) +
+  scale_fill_manual(values = c(
+    "mv_tokens" = "#1E41FF",
+    "other_tokens" = "wheat3"
+  ), labels = c("Max Verstappen", "Other Drivers")) +
+  labs(x = "Season", y = "Total Tokens (k)", fill = "Token Source") +
+  theme_minimal()
+```
+
+The corpus used in this study consists of official FIA press conference transcripts from Formula 1 drivers between 2022 and 2025, scraped from formula1.com. Each Grand Prix weekend includes a mix of sessions: Thursday, post-qualifying, post-sprint, and post-race press conferences. Each session typically features 3 to 6 drivers per conference. Each press conference is accessed via a unique webpage, and all remarks made by a single driver in a session are aggregated into one document.
+
+Only transcripts containing 200+ tokens of driver speech were retained to ensure meaningful linguistic analysis. After preprocessing, the final corpus included 1,048 documents totaling 947,474 tokens, with each document labeled by driver, team, Grand Prix, season, and conference type. This structure enables both season-level analysis and driver-level style comparison. There is a balanced representation across the four seasons, with approximately 250 documents and over 230,000 tokens per year (see Table 1).
+
+The stacked bar chart in Figure 1 illustrates total token volume per season, with the blue section indicating the proportion attributable to Max Verstappen. Across all four years, Verstappen contributes a substantial and stable share of total corpus tokens, ensuring that the classification task later in this report has sufficient sample size for training and predictive reliability. Token volume grows slightly each season, suggesting that the corpus is not concentrated in early or late years.
+
+A primary limitation of the corpus is the uneven press attendance and document volume across drivers, particularly those who achieve podium finishes more frequently. Drivers such as Verstappen produce far more words than those consistently outside podium positions. This may bias predictive results toward well-sampled drivers. 
+
+
+# Methods
+
+To investigate how communication volume changes over time, I computed the total number of tokens spoken by each driver in every season (2022–2025). Because some drivers appear infrequently across years, I restricted analysis to the top seven drivers by total token count over the full corpus. This ensures comparability and avoids misleading trends caused by drivers who have minimal press coverage. Annual totals were visualized using line charts, allowing us to observe whether high-performing drivers maintain consistent media presence or fluctuate due to competitive performance, team strategy, or season context. This method directly answers RQ1 by quantifying how much drivers speak and how consistently they appear in press conferences.
+
+To evaluate whether drivers share stylistic tendencies, I applied hierarchical clustering on part-of-speech distributions. All transcripts for each driver were concatenated into a combined document, then parsed using UDPipe to produce proportional counts of Universal POS categories (NOUN, VERB, ADJ, PRON, etc.). Features were normalized so stylistic differences reflect grammatical preference rather than speech volume. Clusters were computed using Ward’s D2 linkage. A dendrogram were used to assess the clusters, and PCA was performed to visualize how drivers separate along major linguistic dimensions. This method shows whether speech patterns cluster by personality, first language, team environment, or performance.
+
+```{r}
+#| label: tbl-split
+#| tbl-cap: "Test, Train, and Validation set split"
+# Create a table displaying test/train/validation split
+total_docs <- nrow(summary)
+
+train_df %>%
+  group_by(is_MV) %>%
+  summarise(count = n(), set = "Train") %>%
+  bind_rows(
+    valid_df %>%
+      group_by(is_MV) %>%
+      summarise(count = n(), set = "Validation")
+  ) %>%
+  bind_rows(
+    test_set %>%
+      group_by(is_MV) %>%
+      summarise(count = n(), set = "Test")
+  ) %>%
+  pivot_wider(names_from = is_MV, values_from = count, values_fill = 0) %>%
+  dplyr::rename(Non_MV = `0`, MV = `1`) %>%
+  mutate(
+    Total = Non_MV + MV,
+    Percent_of_Corpus = round((Total / total_docs) * 100)
+  ) %>%
+  gt() %>%
+  cols_label(
+    set = md("**Dataset**"),
+    Non_MV = md("**Non-MV**"),
+    MV = md("**MV**"),
+    Total = md("**Total Docs**"),
+    Percent_of_Corpus = md("**% of Entire Corpus**")
+  )
+```
+
+The classification task is focused on whether a transcript was spoken by Max Verstappen (1) or any other driver (0). 
+To evaluate generalization realistically, the dataset was split chronologically: training data included transcripts from 2022 to 2024, while 2025 transcripts formed the test set. 
+Within the training data, an 80/20 split created a validation set. The split is shown in Table 2. A chronological held-out test set ensures that results reflect predictive ability. In all sets, class balance is roughly maintained, with Verstappen representing about 15-20% of documents. This avoids biasing the model toward the majority class.
+
+Because the feature space is moderately high-dimensional and correlated, I applied LASSO logistic regression using cv.glmnet() with alpha = 1. LASSO performs variable selection by shrinking some coefficients to zero, reducing overfitting and improving interpretability. Cross-validation determined the optimal penalty $\lambda$, and the final model was fit using that value. Only non-zero coefficients were interpreted as meaningful markers of speech style.
+
+```{r}
+feature_table <- tribble(
+  ~Feature_Type,                ~Feature_Details,
+  "Token-level features",       "Word count, average word length, average sentence length",
+  "Keyword presence",           "they, struggle, happy, difficult, tough, win, fast, fight",
+  "Pronoun usage",              'Per-thousand-token frequency of "I" and "we"',
+  "POS distributions",          "Percentage of tokens in POS classes (NOUN, VERB, ADJ, etc.)"
+)
+```
+
+```{r}
+#| label: tbl-features
+#| tbl-cap: "Features Used for LASSO Classification"
+feature_table %>%
+  gt() %>%
+  cols_label(
+    Feature_Type = md("**Feature Type**"),
+    Feature_Details = md("**Extracted Variables**")
+  ) 
+```
+
+The features used for the classification task are shown in Table 3. 
+Regularization was selected because the linguistic features might not be independent and many may contribute very weak signal. Penalization improves stability, reduces noise, and highlights the strongest predictors that are best for classification and prediction. 
+
+
+# Results
+
+```{r}
+# Convert to a dataframe and join metadata
+driver_tokens <- data.frame(
+  driver = docvars(f1_corpus, "driver"),
+  year = docvars(f1_corpus, "year"),
+  total_tokens = docvars(f1_corpus, "token_count")
+) %>%
+  group_by(year, driver) %>%
+  summarise(total_tokens = sum(total_tokens), .groups = "drop") %>%
+  arrange(desc(total_tokens))
+```
+
+```{r}
+top_drivers <- c(
+  "Max Verstappen",   
+  "Lewis Hamilton",   
+  "Charles Leclerc",  
+  "Carlos Sainz",
+  "Lando Norris",    
+  "George Russell",  
+  "Oscar Piastri")
+
+driver_tokens_top <- driver_tokens %>%
+  filter(driver %in% top_drivers)
+```
+
+```{r}
+driver_colors <- c(
+  "Max Verstappen" = "#1E41FF",   
+  "Lewis Hamilton" = "#00D2BE",   
+  "Charles Leclerc" = "red",  
+  "Carlos Sainz" = "darkred",
+  "Lando Norris" = "#FF8700",     
+  "George Russell" = "#A5D7FF",   
+  "Oscar Piastri" = "#FFC300"     
+)
+```
+
+```{r, fig.width=6, fig.height=3.5}
+#| label: fig-driver_tokens
+#| fig-cap: "Token Count by Driver per Year"
+ggplot(driver_tokens_top, aes(x = as.factor(year), y = total_tokens, 
+                               color = driver, group = driver)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 1.5) +
+  labs(
+    title = "",
+    x = "",
+    y = "Total Tokens",
+    color = "Driver"
+  ) +
+  coord_cartesian(ylim = c(0, 62000)) +
+  scale_color_manual(values = driver_colors) +
+  theme_minimal()
+```
+
+Figure 2 presents total token counts for the seven most frequently interviewed Formula 1 drivers across seasons 2022–2025. Token count serves as a practical reflection for media presence. Across all four seasons, Max Verstappen consistently appears among the top speakers, peaking in 2023 and remaining strongly represented through 2025. This pattern is consistent with his role as a dominant on-track competitor, aligning with the expectation that drivers who consistently contend for race wins and championships receive more media attention.
+
+Lando Norris displays the most striking upward trajectory, beginning with comparatively limited coverage in 2022 and rising sharply to become the most dominant speaker by 2025. This coincides with his emergence as the new world champion in 2025, illustrating how competitive success translates into increased media exposure. In contrast, Lewis Hamilton shows a stable but modest decline in total word output over the same period, while Ferrari drivers Charles Leclerc and Carlos Sainz fluctuate season-to-season with similar trends.
+
+Overall, this analysis confirms that token volume reflects competitive relevance and media prominence in Formula 1. This finding provides a strong foundation for the other two research questions. The variation in exposure across seasons supports the importance of exploring stylistic differences and testing whether language features can classify Verstappen against the grid.
+
+
+```{r, fig.width=6.5, fig.height=3.6}
+#| label: fig-cluster
+#| fig-cap: "Hierarchical Clustering Dendrogram of Drivers (5 Clusters)"
+fviz_dend(
+  hc_driver_10,
+  k = 5,                            
+  cex = 0.55,                        
+  horiz = TRUE,                     
+  main = "",
+  xlab = "",
+  ylab = "Distance"
+)
+```
+
+Figure 3 visualizes hierarchical clustering of POS-tag distributions across drivers, cut into five clusters. 
+One small cluster at the bottom contains two rookies, Zhou Guanyu and Logan Sargeant, reflecting similar linguistic behavior and relatively lack of experience in press conferences.
+Another pair contains the two Spanish drivers, Carlos Sainz and Fernando Alonso. This is consistent with their shared speech styles due to the influence of their first language and culture. 
+Another four-driver cluster includes three world champions—Lewis Hamilton, Lando Norris, and Max Verstappen. This grouping suggests that media experience and championship status may correspond with stylistic habits. 
+Remaining drivers form two larger clusters with greater internal variability, consistent with a wider range of lexical choices and press experience levels.
+
+```{r, fig.width=6, fig.height=3.6}
+#| label: fig-pca
+#| fig-cap: "PCA Biplot of Drivers by POS Features"
+fviz_pca_biplot(km_pca, repel = TRUE, title = "",
+                select.var = list(contrib = 10),
+                col.var = "tomato", 
+                col.ind = "gray30",
+                labelsize = 3
+)
+```
+
+Figure 4 provides a PCA visualization illustrating how POS features contribute to stylistic differences. The first two components explain approximately 48% of total variation.
+Zhou and Sargeant lie at the extreme left of PC1, consistent with high use of adpositions and verbs and supporting their distinct placement in the dendrogram. 
+Sainz and Alonso are positioned high on PC2, driven by elevated frequency of numerals and proper nouns. 
+Many other drivers occupy a dense central region, indicating moderate and balanced POS use without strong directional loading. 
+Variation in POS-based style provides the foundation for predictive modelling, demonstrating that classification of speakers is both statistically reasonable.
+
+To address the third research question, a LASSO logistic regression model was trained to predict whether a press conference transcript was spoken by Max Verstappen or by another driver. After splitting the corpus into training, validation, and a held-out test set, cross-validation selected a minimal lambda of 0.0092. Out of the 30 candidate linguistic predictors, the model retained 20 non-zero coefficients. The classifier reached 87.9% accuracy on the validation set and 85.8% on the 2025 test set. 
+
+```{r}
+coef_tbl <- coef(cv_fit, s = "lambda.min") |>
+  as.matrix() |>
+  data.frame() |>
+  rownames_to_column("Variable") |>
+  rename(Coeff = lambda.min) |>
+  filter(Coeff != 0) |>
+  mutate(Coeff = round(Coeff, 3))
+```
+
+```{r, fig.width=5, fig.height=4}
+#| label: fig-coef
+#| fig-cap: "LASSO Coefficients for Predicting Max Verstappen Transcripts"
+coef_tbl |>
+  filter(!(Variable %in% c("(Intercept)", "X"))) |>
+  mutate(Variable = fct_reorder(Variable, Coeff)) |>
+  ggplot(aes(x = Variable, y = Coeff, fill = Coeff > 0)) +
+  geom_col() +
+  scale_fill_manual(values = c("tomato2", "darkgreen"),
+                    labels = c("Negative Effect", "Positive Effect")) +
+  coord_flip() +
+  theme_minimal(base_size = 13) +
+  labs(x = "Feature", y = "Coefficient", fill = "")
+```
+
+Figure 5 displays the selected coefficients, where green ones are positive and red ones are negative. 
+Predictors with positive coefficients include frequencies of "they", "difficult", "win", and "happy". They indicate higher likelihood of a Verstappen transcript. 
+These patterns suggest that Verstappen’s speech regularly includes references to external agents like other teams (“they”), performance evaluations (“difficult,” “win”), and positive reactions (“happy”). 
+
+Conversely, the strongest negative predictor is average word length, indicating that longer or more complex words are associated with other drivers rather than Verstappen. 
+Other negative coefficients include the frequencies of "fight", "struggle", and the proportion of particles (PART) and adjectives (ADJ).
+When these features appear more frequently, a transcript is less likely to belong to Verstappen. 
+
+Overall, the results demonstrate that Verstappen’s linguistic signature is identifiable and stable across seasons. The stylistic features collectively highlight Verstappen’s characteristic style of have more reference to others, some particular evaluations of race performances, shorter words, and less self-referential constructions.
+
+
+# Discussion
+
+The analyses in this study show that Formula 1 drivers display unique linguistic patterns in their press-conference speech, with connections to competitiveness, experience, and personal communication style. The token-count analysis demonstrated that media presence reliably reflects on-track performance. Verstappen consistently produced high word totals across all four seasons, while Norris’ sharp rise in 2025 paralleled his emergence as world champion. 
+
+The POS-based clustering analysis showed that drivers do not share a uniform linguistic profile. The hierarchical clustering and PCA revealed groupings consistent with competitive status, linguistic background, and media experience. Rookie drivers Zhou and Sargeant clustered together due to simpler syntactic patterns and limited press exposure, while Alonso and Sainz formed a pair consistent with shared Spanish-influenced English usage. Notably, the three recent world champions, Hamilton, Verstappen, and Norris, clustered closely, suggesting that extensive media experience may shape a similar professional language style. 
+
+The classification results further demonstrated that linguistic features provide a distinctive signature of speaker identity. The LASSO model achieved strong validation (87.9%) and test accuracy (85.8%) in identifying Verstappen’s transcripts, selecting features consistent with his direct and performance-focused style. Positive predictors such as frequencies of "they", "difficult", and "win" highlight his evaluative framing of events, while shorter average word length strongly distinguished him from other drivers. 
+
+## Limitations
+First, the corpus reflects imbalance in press-conference participation. Drivers with more podiums naturally appear more often, introducing bias that may amplify stylistic features tied to media exposure rather than linguistic tendencies. 
+Second, the analysis draws exclusively from FIA press conferences over a four-year window, omitting earlier seasons and excluding other major forms of driver communication such as interviews. 
+Third, while the feature set captures important lexical and POS-based characteristics, it remains limited. Future work could incorporate richer indicators such as lexical diversity and measures of syntactic complexit to provide a more complete account of individual speaking style. 
+
+
+# Acknowledgments {.appendix}
+Generative AI is used in the process of scraping online data. It was helpful in providing a starting point for the data collection process. Nevertheless, I still spent a large amount of time modifying and debugging to fit my specific needs for the corpus. 
+
+
+# Works Cited
+Frederick Mosteller & David L. Wallace (1963) Inference in an Authorship Problem, Journal of the American Statistical Association, 58:302, 275-309 \newline
+Xiao, Richard. (2009) Multidimensional analysis and the study of world Englishes, World Englishes, 28(4), 421–450 \newline
+Granger, Sylviane (2017) Academic Phraseology: A Key Ingredient in Successful L2 Academic Literacy \newline
+Le, Xuan, Ellen Riloff & Mark Tanner. (2018) Longitudinal detection of dementia through lexical and syntactic changes in writing: a case study of three British novelists, Literary and Linguistic Computing, 33(1), 1–22 \newline
+Lab 1: Mosteller & Wallace, 36668 Text Analysis, Fall 2025, CMU \newline
+Lab 7: Part-of-Speech Tagging and Dependency Parsing, 36668 Text Analysis, Fall 2025, CMU \newline
+Lab 10: Cluster Analysis, 36668 Text Analysis, Fall 2025, CMU 
+
