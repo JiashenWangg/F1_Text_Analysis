@@ -108,3 +108,58 @@ a lightweight interface that allows users to input custom text and receive both
 predictions and explanations in real time. The screenshot below shows the final 
 user interface and example output of the application.
 ![F1 Speaker Classification Application Screenshot](f1_llm.png)
+
+### How to Run the Application
+
+To run the application locally, follow the steps below:
+
+#### 1. Clone the repository
+```bash
+git clone <your-repo-link>
+cd <your-repo-folder>
+```
+
+#### 2. Set up the R environment
+Open R or RStudio and install the required packages:
+```r
+install.packages(c("plumber", "quanteda", "quanteda.extras", "udpipe",
+                   "glmnet", "tidyverse", "httr2", "jsonlite"))
+```
+
+#### 3. Set API key for LLM (optional, for explanation layer)
+```r
+Sys.setenv(HF_TOKEN = "your_huggingface_token_here")
+```
+
+#### 4. Start the R backend API
+```r
+library(plumber)
+pr("api.R")$run(port = 8000)
+```
+
+This will launch the prediction API at:
+```
+http://127.0.0.1:8000
+```
+
+#### 5. Run the Python interface (Streamlit)
+In a new terminal:
+```bash
+pip install streamlit requests pandas
+streamlit run app.py
+```
+
+#### 6. Use the application
+- Open the Streamlit app in your browser  
+- Paste a transcript into the input box  
+- Click **Predict** to see:
+  - classification result  
+  - probability  
+  - LLM-generated explanation  
+
+---
+
+### Notes
+- The model performs best on inputs with **≥200 tokens**, similar to the training data  
+- Ensure the required model files (e.g., `.rds`, UDPipe model) are in the project directory  
+- The LLM explanation layer requires a valid API token; otherwise, only model predictions will be shown 
