@@ -90,3 +90,21 @@ Key linguistic indicators of Verstappen’s speech include:
 - Shorter average word length
 - Lower reliance on particles and adjectives
 
+## LLM Application
+Building on the core analysis of linguistic patterns and speaker classification, 
+I developed an end-to-end NLP application that operationalizes these insights 
+into an interactive tool. The system analyzes Formula 1 press conference 
+transcripts and predicts whether the speaker is Max Verstappen using a stylometric 
+classification model. The workflow begins with collecting and preprocessing 
+unstructured text data, followed by feature extraction using linguistic signals 
+such as part-of-speech distributions, keyword indicators, and pronoun usage. 
+A trained LASSO logistic regression model then produces a probabilistic prediction 
+based on these features.
+
+To enhance interpretability, I integrated a generative AI layer using an LLM, 
+which translates structured model outputs into clear, natural-language explanations 
+grounded in the underlying linguistic patterns. The system is deployed through 
+a lightweight interface that allows users to input custom text and receive both 
+predictions and explanations in real time. The screenshot below shows the final 
+user interface and example output of the application.
+![F1 Speaker Classification Application Screenshot](f1_llm.png)

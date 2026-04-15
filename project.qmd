@@ -585,6 +585,23 @@ coef_tbl |>
   theme_minimal(base_size = 13) +
   labs(x = "Feature", y = "Coefficient", fill = "")
 ```
+```{r}
+# x_train to numeric
+x_train <- apply(x_train, 2, as.numeric)
+```
+
+```{r}
+# Save LASSO model and feature scaler for prediction pipeline
+saveRDS(lasso_model, "lasso_model.rds")
+
+sc <- scale(x_train)
+scaler <- list(
+  center = attr(sc, "scaled:center"),
+  scale  = attr(sc, "scaled:scale")
+)
+saveRDS(scaler, "feature_scaler.rds")
+```
+
 
 Figure 5 displays the selected coefficients, where green ones are positive and red ones are negative. 
 Predictors with positive coefficients include frequencies of "they", "difficult", "win", and "happy". They indicate higher likelihood of a Verstappen transcript. 
